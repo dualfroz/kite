@@ -1,0 +1,13 @@
+# swiftpm / build tooling
+.build/
+.swiftpm/
+Package.resolved
+
+# xcode
+xcuserdata/
+DerivedData/
+
+# os / logs / env
+.DS_Store
+*.log
+.env
