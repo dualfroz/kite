@@ -244,4 +244,128 @@ public struct BigInt: Equatable, Comparable, Hashable, CustomStringConvertible {
         if r.negative != other.negative { return r + other }
         return r
     }
+
+    public static func gcd(_ a: BigInt, _ b: BigInt) -> BigInt {
+        var x = a.magnitude
+        var y = b.magnitude
+        while !y.isZero {
+            let r = x.remainder(y)
+            x = y
+            y = r
+        }
+        return x
+    }
+
+    public func power(_ exponent: Int) -> BigInt {
+        if exponent <= 0 { return .one }
+        var result = BigInt.one
+        var base = self
+        var e = exponent
+        while e > 0 {
+            if e & 1 == 1 { result = result * base }
+            e >>= 1
+            if e > 0 { base = base * base }
+        }
+        return result
+    }
+
+    public func isqrt() -> BigInt {
+        if negative { return .zero }
+        if mag.isEmpty { return .zero }
+        let bits = BigInt.bitLength(mag)
+        var guess = BigInt(negative: false, mag: BigInt.shiftBitsLeft([1], by: (bits + 1) / 2))
+        while true {
+            let quotient = quotient(guess)
+            let next = BigInt.divMod(guess + quotient, BigInt(2)).quotient
+            if next >= guess { break }
+            guess = next
+        }
+        while guess * guess > self { guess = guess - .one }
+        return guess
+    }
+
+    static func shiftBitsLeft(_ a: [UInt32], by bits: Int) -> [UInt32] {
+        if a.isEmpty { return [] }
+        let limbShift = bits / 32
+        let bitShift = bits % 32
+        var out = [UInt32](repeating: 0, count: limbShift)
+        if bitShift == 0 {
+            out.append(contentsOf: a)
+        } else {
+            var carry: UInt32 = 0
+            for limb in a {
+                out.append((limb << UInt32(bitShift)) | carry)
+                carry = limb >> UInt32(32 - bitShift)
+            }
+            if carry != 0 { out.append(carry) }
+        }
+        while let last = out.last, last == 0 { out.removeLast() }
+        return out
+    }
+
+    public var description: String { toString(radix: 10) }
+
+    public func toString(radix: Int) -> String {
+        if mag.isEmpty { return "0" }
+        let digits = "0123456789abcdefghijklmnopqrstuvwxyz"
+        let alphabet = Array(digits)
+        var chunkBase: UInt32 = 1
+        var chunkDigits = 0
+        while UInt64(chunkBase) * UInt64(radix) < 0x1_0000_0000 {
+            chunkBase *= UInt32(radix)
+            chunkDigits += 1
+        }
+        var current = mag
+        var groups: [UInt32] = []
+        while !current.isEmpty {
+            let (q, r) = BigInt.divModSmall(current, chunkBase)
+            groups.append(r)
+            current = q
+        }
+        var out = ""
+        if negative { out.append("-") }
+        for (index, group) in groups.enumerated().reversed() {
+            var value = group
+            var chunk = ""
+            for _ in 0..<chunkDigits {
+                chunk = String(alphabet[Int(value % UInt32(radix))]) + chunk
+                value /= UInt32(radix)
+            }
+            if index == groups.count - 1 {
+                while chunk.count > 1 && chunk.first == "0" { chunk.removeFirst() }
+            }
+            out += chunk
+        }
+        return out
+    }
+
+    public init?(string: String, radix: Int) {
+        var chars = Array(string)
+        var neg = false
+        var idx = 0
+        if idx < chars.count && (chars[idx] == "+" || chars[idx] == "-") {
+            neg = chars[idx] == "-"
+            idx += 1
+        }
+        if idx >= chars.count { return nil }
+        var magnitudeValue = BigInt.zero
+        let radixBig = BigInt(radix)
+        while idx < chars.count {
+            let c = chars[idx]
+            guard let digit = BigInt.digitValue(c), digit < radix else { return nil }
+            magnitudeValue = magnitudeValue * radixBig + BigInt(digit)
+            idx += 1
+        }
+        chars.removeAll()
+        self = neg ? magnitudeValue.negated : magnitudeValue
+    }
+
+    static func digitValue(_ c: Character) -> Int? {
+        if let d = c.wholeNumberValue, c.isNumber { return d }
+        let lower = Character(c.lowercased())
+        if lower >= "a" && lower <= "z" {
+            return 10 + Int(lower.asciiValue! - Character("a").asciiValue!)
+        }
+        return nil
+    }
 }
