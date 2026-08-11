@@ -1,0 +1,30 @@
+; call/cc used for early exit from a loop.
+(define (list-product items)
+  (call/cc
+    (lambda (break)
+      (let loop ((xs items) (acc 1))
+        (cond ((null? xs) acc)
+              ((= (car xs) 0) (break 0))
+              (else (loop (cdr xs) (* acc (car xs)))))))))
+
+(display "product 1..5 = ")
+(display (list-product '(1 2 3 4 5)))
+(newline)
+(display "product with a zero = ")
+(display (list-product '(1 2 0 4 5)))
+(newline)
+
+; call/cc with re-entry: a captured continuation is invoked repeatedly
+; to build a loop that sums 1..5 within a single expression.
+(display "reentry sum 1..5 = ")
+(display
+  (let ((sum 0)
+        (i 0)
+        (k #f))
+    (call/cc (lambda (c) (set! k c)))
+    (set! i (+ i 1))
+    (set! sum (+ sum i))
+    (if (< i 5)
+        (k #f)
+        sum)))
+(newline)
