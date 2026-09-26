@@ -1,4 +1,3 @@
-; Higher-order list operations.
 (display "squares: ")
 (display (map (lambda (x) (* x x)) '(1 2 3 4 5)))
 (newline)

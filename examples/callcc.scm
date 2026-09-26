@@ -1,4 +1,3 @@
-; call/cc used for early exit from a loop.
 (define (list-product items)
   (call/cc
     (lambda (break)
@@ -14,8 +13,6 @@
 (display (list-product '(1 2 0 4 5)))
 (newline)
 
-; call/cc with re-entry: a captured continuation is invoked repeatedly
-; to build a loop that sums 1..5 within a single expression.
 (display "reentry sum 1..5 = ")
 (display
   (let ((sum 0)

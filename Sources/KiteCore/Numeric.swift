@@ -33,16 +33,6 @@ func numToValue(_ n: Num) -> Value {
     }
 }
 
-func asNumFromValue(_ value: Value) -> Num {
-    switch value {
-    case .integer(let n): return .int(n)
-    case .bigint(let b): return .big(b)
-    case .rational(let n, let d): return .rat(n, d)
-    case .real(let d): return .real(d)
-    default: return .int(0)
-    }
-}
-
 private func isReal(_ n: Num) -> Bool {
     if case .real = n { return true }
     return false
@@ -139,17 +129,6 @@ func numCompare(_ a: Num, _ b: Num) -> Int {
     let right = bn * ad
     if left == right { return 0 }
     return left < right ? -1 : 1
-}
-
-func asExactInteger(_ value: Value, _ who: String) throws -> BigInt {
-    switch value {
-    case .integer(let n): return BigInt(n)
-    case .bigint(let b): return b
-    case .real(let d) where d == d.rounded() && d.isFinite:
-        return exactIntegerFromDouble(d)
-    default:
-        throw schemeError("\(who): expected integer", [value])
-    }
 }
 
 func exactIntegerFromDouble(_ d: Double) -> BigInt {

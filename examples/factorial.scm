@@ -1,4 +1,3 @@
-; Tail-recursive factorial using a named let accumulator.
 (define (factorial n)
   (let loop ((i n) (acc 1))
     (if (= i 0)
