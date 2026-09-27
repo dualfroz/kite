@@ -27,6 +27,8 @@ public enum SpecialKind {
     case apply
     case callCC
     case withExceptionHandler
+    case raise
+    case raiseContinuable
     case dynamicWind
     case values
     case callWithValues
@@ -40,34 +42,95 @@ public final class VectorRef {
 }
 
 public final class ErrorObject {
+    public enum Kind {
+        case general
+        case read
+        case file
+    }
+
     public let message: String
     public let irritants: [Value]
-    public let kind: String
-    public init(message: String, irritants: [Value], kind: String = "error") {
+    public let kind: Kind
+    public init(message: String, irritants: [Value], kind: Kind = .general) {
         self.message = message
         self.irritants = irritants
         self.kind = kind
     }
 }
 
+final class PromiseState {
+    var done: Bool
+    var lazy: Bool
+    var payload: Value
+
+    init(done: Bool, lazy: Bool, payload: Value) {
+        self.done = done
+        self.lazy = lazy
+        self.payload = payload
+    }
+}
+
 public final class Promise {
-    public var forced: Bool
-    public var value: Value
-    public var thunk: Value
-    public init(thunk: Value) {
-        self.forced = false
-        self.value = .unspecified
-        self.thunk = thunk
+    var state: PromiseState
+
+    init(done: Bool, lazy: Bool, payload: Value) {
+        self.state = PromiseState(done: done, lazy: lazy, payload: payload)
+    }
+
+    public static func resolved(_ value: Value) -> Promise {
+        Promise(done: true, lazy: false, payload: value)
+    }
+
+    public var isForced: Bool { state.done }
+}
+
+public final class RecordType {
+    public let name: String
+    public let fields: [String]
+    init(name: String, fields: [String]) {
+        self.name = name
+        self.fields = fields
+    }
+}
+
+public final class Record {
+    public let type: RecordType
+    public var fields: [Value]
+    init(type: RecordType, fields: [Value]) {
+        self.type = type
+        self.fields = fields
+    }
+}
+
+public struct Arity {
+    public let min: Int
+    public let max: Int?
+
+    public static func exactly(_ count: Int) -> Arity { Arity(min: count, max: count) }
+    public static func atLeast(_ count: Int) -> Arity { Arity(min: count, max: nil) }
+    public static func between(_ low: Int, _ high: Int) -> Arity { Arity(min: low, max: high) }
+
+    func check(_ count: Int, _ who: String) throws {
+        if count >= min, max.map({ count <= $0 }) ?? true { return }
+        let expected: String
+        switch max {
+        case .some(let high) where high == min: expected = "\(min)"
+        case .some(let high): expected = "\(min) to \(high)"
+        case .none: expected = "at least \(min)"
+        }
+        throw schemeError("\(who): expected \(expected) argument\(expected == "1" ? "" : "s"), got \(count)")
     }
 }
 
 public final class Builtin {
     public let name: String
     public let special: SpecialKind
+    public let arity: Arity
     public let fn: ([Value]) throws -> Value
-    init(name: String, special: SpecialKind = .none, fn: @escaping ([Value]) throws -> Value) {
+    init(name: String, special: SpecialKind = .none, arity: Arity, fn: @escaping ([Value]) throws -> Value) {
         self.name = name
         self.special = special
+        self.arity = arity
         self.fn = fn
     }
 }
@@ -88,6 +151,8 @@ public indirect enum Value {
     case port(Port)
     case errorObject(ErrorObject)
     case promise(Promise)
+    case record(Record)
+    case recordType(RecordType)
     case builtin(Builtin)
     case closure(Lambda)
     case continuation(Kont, [Winder], [Value])
@@ -165,17 +230,6 @@ func isProperList(_ value: Value) -> Bool {
     }
 }
 
-func gcdInt(_ a: Int, _ b: Int) -> Int {
-    var x = a == Int.min ? a : abs(a)
-    var y = b == Int.min ? b : abs(b)
-    x = x < 0 ? -(x + 1) &+ 1 : x
-    y = y < 0 ? -(y + 1) &+ 1 : y
-    while y != 0 {
-        (x, y) = (y, x % y)
-    }
-    return x
-}
-
 func normalizeBig(_ value: BigInt) -> Value {
     value.fitsInt ? .integer(value.toInt()) : .bigint(value)
 }
@@ -204,10 +258,6 @@ func makeRatio(_ numerator: BigInt, _ denominator: BigInt) -> Value {
     return .rational(num, den)
 }
 
-func makeRational(_ n: Int, _ d: Int) -> Value {
-    makeRatio(BigInt(n), BigInt(d))
-}
-
 func eqv(_ a: Value, _ b: Value) -> Bool {
     switch (a, b) {
     case (.null, .null): return true
@@ -227,6 +277,8 @@ func eqv(_ a: Value, _ b: Value) -> Bool {
     case (.port(let x), .port(let y)): return x === y
     case (.errorObject(let x), .errorObject(let y)): return x === y
     case (.promise(let x), .promise(let y)): return x === y
+    case (.record(let x), .record(let y)): return x === y
+    case (.recordType(let x), .recordType(let y)): return x === y
     case (.closure(let x), .closure(let y)): return x === y
     case (.builtin(let x), .builtin(let y)): return x === y
     default: return false
@@ -248,7 +300,11 @@ func equalValues(_ a: Value, _ b: Value) -> Bool {
     }
 }
 
-func schemeHash(_ value: Value, _ depth: Int = 0) -> Int {
+func identityHash(_ object: AnyObject) -> Int {
+    ObjectIdentifier(object).hashValue
+}
+
+func schemeHash(_ value: Value, structural: Bool, _ depth: Int = 0) -> Int {
     if depth > 12 { return 0 }
     switch value {
     case .null: return 1
@@ -261,14 +317,26 @@ func schemeHash(_ value: Value, _ depth: Int = 0) -> Int {
     case .string(let s): return s.hashValue
     case .symbol(let s): return s.hashValue
     case .pair(let p):
-        return (schemeHash(p.car, depth + 1) &* 31) &+ schemeHash(p.cdr, depth + 1) &+ 7
+        guard structural else { return identityHash(p) }
+        return (schemeHash(p.car, structural: true, depth + 1) &* 31)
+            &+ schemeHash(p.cdr, structural: true, depth + 1) &+ 7
     case .vector(let v):
+        guard structural else { return identityHash(v) }
         var acc = 17
-        for item in v.items.prefix(8) { acc = (acc &* 31) &+ schemeHash(item, depth + 1) }
+        for element in v.items.prefix(8) {
+            acc = (acc &* 31) &+ schemeHash(element, structural: true, depth + 1)
+        }
         return acc
+    case .hashTable(let h): return identityHash(h)
+    case .port(let p): return identityHash(p)
+    case .errorObject(let e): return identityHash(e)
+    case .promise(let p): return identityHash(p)
+    case .record(let r): return identityHash(r)
+    case .recordType(let t): return identityHash(t)
+    case .closure(let l): return identityHash(l)
+    case .builtin(let b): return identityHash(b)
     case .eof: return 5
     case .unspecified: return 6
-    default:
-        return 0
+    case .continuation, .values, .syntax: return 0
     }
 }

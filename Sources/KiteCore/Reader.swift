@@ -7,6 +7,8 @@ public final class Reader {
         self.pos = 0
     }
 
+    public var position: Int { pos }
+
     public func readProgram() throws -> [Value] {
         var forms: [Value] = []
         while true {
@@ -34,7 +36,7 @@ public final class Reader {
     }
 
     private func isDelimiter(_ c: Character) -> Bool {
-        c == "(" || c == ")" || c == "\"" || c == ";" || c == "'"
+        c == "(" || c == ")" || c == "[" || c == "]" || c == "\"" || c == ";" || c == "'"
             || c == "`" || c == "," || c.isWhitespace
     }
 
@@ -187,8 +189,18 @@ public final class Reader {
             return try readChar()
         }
         if c == "(" {
-            let list = try readList(close: ")")
-            return list
+            return .vector(VectorRef(try listToArray(try readList(close: ")"))))
+        }
+        if let radix = radixPrefixes[Character(c.lowercased())] {
+            pos += 1
+            var token = ""
+            while pos < chars.count && !isDelimiter(chars[pos]) {
+                token.append(advance())
+            }
+            guard let number = parseNumber(token, radix: radix) else {
+                throw schemeError("bad number literal: #\(c)\(token)")
+            }
+            return number
         }
         throw schemeError("unsupported # syntax: #\(c)")
     }
@@ -230,31 +242,29 @@ public final class Reader {
     }
 
     private func classifyAtom(_ token: String) -> Value {
-        if let n = parseInteger(token) {
-            return .integer(n)
-        }
-        if let rat = parseRational(token) {
-            return rat
-        }
-        if let d = parseReal(token) {
-            return .real(d)
-        }
-        return .symbol(token)
+        parseNumber(token, radix: 10) ?? .symbol(token)
     }
 }
 
-func parseInteger(_ token: String) -> Int? {
-    if token.isEmpty { return nil }
-    if token == "+" || token == "-" || token == "..." || token == "." { return nil }
-    return Int(token)
+private let radixPrefixes: [Character: Int] = ["x": 16, "b": 2, "o": 8, "d": 10]
+
+func parseNumber(_ token: String, radix: Int) -> Value? {
+    if let integer = exactInteger(token, radix: radix) { return normalizeBig(integer) }
+    if let slash = token.firstIndex(of: "/") {
+        let denText = String(token[token.index(after: slash)...])
+        guard let first = denText.first, first != "+", first != "-",
+              let num = exactInteger(String(token[..<slash]), radix: radix),
+              let den = exactInteger(denText, radix: radix),
+              !den.isZero else { return nil }
+        return makeRatio(num, den)
+    }
+    if radix == 10, let d = parseReal(token) { return .real(d) }
+    return nil
 }
 
-func parseRational(_ token: String) -> Value? {
-    guard let slash = token.firstIndex(of: "/") else { return nil }
-    let numPart = String(token[..<slash])
-    let denPart = String(token[token.index(after: slash)...])
-    guard let n = Int(numPart), let d = Int(denPart), d != 0 else { return nil }
-    return makeRational(n, d)
+private func exactInteger(_ text: String, radix: Int) -> BigInt? {
+    if let small = Int(text, radix: radix) { return BigInt(small) }
+    return BigInt(string: text, radix: radix)
 }
 
 func parseReal(_ token: String) -> Double? {

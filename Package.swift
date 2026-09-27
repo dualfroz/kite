@@ -3,6 +3,10 @@ import PackageDescription
 
 let package = Package(
     name: "kite",
+    products: [
+        .library(name: "KiteCore", targets: ["KiteCore"]),
+        .executable(name: "kite", targets: ["kite"]),
+    ],
     targets: [
         .target(name: "KiteCore"),
         .executableTarget(

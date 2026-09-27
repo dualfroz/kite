@@ -2,6 +2,7 @@ public final class Interpreter {
     public let globalEnv: Environment
     let gensym: Gensym
     public var output: (String) -> Void
+    private var winderCounter = 0
 
     public init() {
         self.globalEnv = Environment()
@@ -25,34 +26,57 @@ public final class Interpreter {
         return last
     }
 
-    func applyProcedure(_ proc: Value, _ args: [Value]) throws -> Value {
-        try run(.applying(proc, args, .done))
-    }
-
     private func loadPrelude() {
+        let preludeEnv = Environment(parent: globalEnv)
+        installPreludeInternals(BuiltinRegistry(env: preludeEnv))
         do {
-            try evalString(preludeSource)
+            for form in try Reader(preludeSource).readProgram() {
+                _ = try run(.evaluating(form, preludeEnv, .done))
+            }
         } catch {
             fatalError("prelude failed to load: \(error)")
         }
+        for (name, value) in preludeEnv.vars where !name.hasPrefix("%") {
+            globalEnv.define(name, value)
+        }
+    }
+
+    private func nextWinderId() -> Int {
+        winderCounter += 1
+        return winderCounter
     }
 
     private func run(_ initial: MachineState) throws -> Value {
         var state = initial
+        var winders: [Winder] = []
+        var handlers: [Value] = []
         while true {
-            switch state {
-            case .returning(let value, let kont):
-                if case .done = kont { return value }
-                state = try applyKont(value, kont)
-            case .evaluating(let expr, let env, let kont):
-                state = try step(expr, env, kont)
-            case .applying(let proc, let args, let kont):
-                state = try apply(proc, args, kont)
+            do {
+                switch state {
+                case .returning(let value, let kont):
+                    if case .done = kont { return value }
+                    state = try applyKont(value, kont, &winders, &handlers)
+                case .evaluating(let expr, let env, let kont):
+                    state = try step(expr, env, kont)
+                case .applying(let proc, let args, let kont):
+                    state = try apply(proc, args, kont, &winders, &handlers)
+                }
+            } catch let error as SchemeError {
+                if handlers.isEmpty {
+                    let pending = winders.reversed()
+                    winders.removeAll()
+                    for winder in pending {
+                        _ = try run(.applying(winder.after, [], .done))
+                    }
+                    throw error
+                }
+                state = try raise(error.conditionValue, continuable: false, kontOf(state), &handlers)
             }
         }
     }
 
-    private func applyKont(_ value: Value, _ kont: Kont) throws -> MachineState {
+    private func applyKont(_ value: Value, _ kont: Kont,
+                           _ winders: inout [Winder], _ handlers: inout [Value]) throws -> MachineState {
         switch kont {
         case .done:
             return .returning(value, .done)
@@ -82,7 +106,49 @@ public final class Interpreter {
             return .applying(proc, args, next)
         case .seqK(let remaining, let env, let next):
             return seqState(remaining, env, next)
+        case .popHandlerK(let next):
+            if !handlers.isEmpty { handlers.removeLast() }
+            return .returning(value, next)
+        case .afterHandlerK(let handler, let continuable, let next):
+            if continuable {
+                handlers.append(handler)
+                return .returning(value, next)
+            }
+            let secondary = Value.errorObject(ErrorObject(message: "exception handler returned", irritants: [value]))
+            return try raise(secondary, continuable: false, next, &handlers)
+        case .dwBeforeK(let before, let thunk, let after, let next):
+            let id = nextWinderId()
+            winders.append(Winder(id: id, before: before, after: after))
+            return .applying(thunk, [], .dwThunkK(after: after, winderId: id, next))
+        case .dwThunkK(let after, let winderId, let next):
+            if let idx = winders.lastIndex(where: { $0.id == winderId }) {
+                winders.remove(at: idx)
+            }
+            return .applying(after, [], .dwAfterK(result: value, next))
+        case .dwAfterK(let result, let next):
+            return .returning(result, next)
+        case .rewindK(let afters, let befores, let target, let arg, let saved):
+            if let after = afters.first {
+                winders.removeLast()
+                return .applying(after, [], .rewindK(afters: Array(afters.dropFirst()), befores: befores,
+                                                     target: target, arg: arg, saved: saved))
+            }
+            if let winder = befores.first {
+                return .applying(winder.before, [], .rewindK(afters: [], befores: Array(befores.dropFirst()),
+                                                             target: target, arg: arg, saved: saved))
+            }
+            winders = target
+            return .returning(arg, saved)
+        case .callValuesK(let receiver, let next):
+            if case .values(let vs) = value { return .applying(receiver, vs, next) }
+            return .applying(receiver, [value], next)
         }
+    }
+
+    private func raise(_ condition: Value, continuable: Bool, _ kont: Kont,
+                       _ handlers: inout [Value]) throws -> MachineState {
+        guard let handler = handlers.popLast() else { throw conditionError(condition) }
+        return .applying(handler, [condition], .afterHandlerK(handler: handler, continuable: continuable, kont))
     }
 
     private func step(_ expr: Value, _ env: Environment, _ kont: Kont) throws -> MachineState {
@@ -99,13 +165,11 @@ public final class Interpreter {
             throw schemeError("cannot evaluate empty list ()")
         case .pair(let p):
             if case .symbol(let s) = p.car {
-                let base = baseName(s)
                 if let head = env.get(s) {
                     if case .syntax(let rules) = head {
-                        let expanded = try rules.expand(expr, gensym)
-                        return .evaluating(expanded, env, kont)
+                        return .evaluating(try rules.expand(expr, gensym), env, kont)
                     }
-                } else if let special = try specialForm(base, expr, env, kont) {
+                } else if let special = try specialForm(baseName(s), expr, env, kont) {
                     return special
                 }
             }
@@ -156,22 +220,39 @@ public final class Interpreter {
             return .evaluating(try desugarAnd(expr), env, kont)
         case "or":
             return .evaluating(try desugarOr(expr, gensym), env, kont)
+        case "do":
+            return .evaluating(try desugarDo(expr, gensym), env, kont)
+        case "let-values":
+            return .evaluating(try desugarLetValues(expr, gensym), env, kont)
+        case "let*-values":
+            return .evaluating(try desugarLetStarValues(expr), env, kont)
+        case "define-values":
+            return .evaluating(try desugarDefineValues(expr, gensym), env, kont)
+        case "define-record-type":
+            try defineRecordType(expr, in: env)
+            return .returning(.unspecified, kont)
+        case "delay", "delay-force":
+            let thunk = try makeClosure(.null, [try cadrOf(expr)], env, "promise")
+            let promise = Promise(done: false, lazy: base == "delay-force", payload: thunk)
+            return .returning(.promise(promise), kont)
         case "define-syntax":
             let parts = try listToArray(expr)
             guard parts.count == 3, case .symbol(let name) = parts[1] else {
                 throw schemeError("malformed define-syntax")
             }
-            let rules = try SyntaxRules.parse(parts[2])
-            env.define(name, .syntax(rules))
+            env.define(name, .syntax(try SyntaxRules.parse(parts[2], definedIn: env)))
             return .returning(.unspecified, kont)
         case "let-syntax", "letrec-syntax":
             let parts = try listToArray(expr)
-            let bindings = try listToArray(parts[1])
+            guard parts.count >= 2 else { throw schemeError("malformed \(base)") }
             let child = Environment(parent: env)
-            for b in bindings {
-                let bp = try listToArray(b)
-                guard case .symbol(let name) = bp[0] else { throw schemeError("bad let-syntax binding") }
-                child.define(name, .syntax(try SyntaxRules.parse(bp[1])))
+            let definitionEnv = base == "letrec-syntax" ? child : env
+            for binding in try listToArray(parts[1]) {
+                let bp = try listToArray(binding)
+                guard bp.count == 2, case .symbol(let name) = bp[0] else {
+                    throw schemeError("bad \(base) binding")
+                }
+                child.define(name, .syntax(try SyntaxRules.parse(bp[1], definedIn: definitionEnv)))
             }
             return seqState(Array(parts[2...]), child, kont)
         default:
@@ -188,40 +269,55 @@ public final class Interpreter {
             return .evaluating(valueExpr, env, .defineK(name: name, env: env, kont))
         case .pair(let header):
             guard case .symbol(let name) = header.car else { throw schemeError("bad define header") }
-            let lambdaExpr = arrayToList([sym("lambda"), header.cdr] + Array(parts[2...]))
+            let lambdaExpr = arrayToList([core("lambda"), header.cdr] + Array(parts[2...]))
             return .evaluating(lambdaExpr, env, .defineK(name: name, env: env, kont))
         default:
             throw schemeError("malformed define")
         }
     }
 
-    private func apply(_ proc: Value, _ args: [Value], _ kont: Kont) throws -> MachineState {
+    private func apply(_ proc: Value, _ args: [Value], _ kont: Kont,
+                       _ winders: inout [Winder], _ handlers: inout [Value]) throws -> MachineState {
         switch proc {
-        case .continuation(let saved):
-            return .returning(args.first ?? .unspecified, saved)
+        case .continuation(let savedKont, let targetWinders, let savedHandlers):
+            let arg: Value = args.count == 1 ? args[0] : .values(args)
+            handlers = savedHandlers
+            var common = 0
+            while common < winders.count, common < targetWinders.count,
+                  winders[common].id == targetWinders[common].id {
+                common += 1
+            }
+            let afters = winders[common...].reversed().map { $0.after }
+            let befores = Array(targetWinders[common...])
+            return .returning(.unspecified, .rewindK(afters: afters, befores: befores,
+                                                     target: targetWinders, arg: arg, saved: savedKont))
         case .builtin(let builtin):
+            try builtin.arity.check(args.count, builtin.name)
             switch builtin.special {
+            case .none:
+                return .returning(try builtin.fn(args), kont)
             case .callCC:
-                guard args.count == 1 else {
-                    throw schemeError("call/cc expects 1 argument")
-                }
-                let continuation = Value.continuation(kont)
-                return .applying(args[0], [continuation], kont)
+                return .applying(args[0], [.continuation(kont, winders, handlers)], kont)
             case .apply:
-                guard args.count >= 2 else {
-                    throw schemeError("apply expects at least 2 arguments")
-                }
-                let target = args[0]
                 let middle = Array(args[1..<(args.count - 1)])
                 let tail = try listToArray(args[args.count - 1])
-                return .applying(target, middle + tail, kont)
-            case .none:
-                let value = try builtin.fn(args)
-                return .returning(value, kont)
+                return .applying(args[0], middle + tail, kont)
+            case .values:
+                return .returning(args.count == 1 ? args[0] : .values(args), kont)
+            case .callWithValues:
+                return .applying(args[0], [], .callValuesK(receiver: args[1], kont))
+            case .dynamicWind:
+                return .applying(args[0], [], .dwBeforeK(before: args[0], thunk: args[1], after: args[2], kont))
+            case .withExceptionHandler:
+                handlers.append(args[0])
+                return .applying(args[1], [], .popHandlerK(kont))
+            case .raise:
+                return try raise(args[0], continuable: false, kont, &handlers)
+            case .raiseContinuable:
+                return try raise(args[0], continuable: true, kont, &handlers)
             }
         case .closure(let lam):
-            let newEnv = try bindArguments(lam, args)
-            return seqState(lam.body, newEnv, kont)
+            return seqState(lam.body, try bindArguments(lam, args), kont)
         default:
             throw schemeError("not a procedure", [proc])
         }

@@ -16,13 +16,15 @@ let ellipsisName = "..."
 public final class SyntaxRules {
     let literals: [String]
     let rules: [(pattern: Value, template: Value)]
+    let macroId: Int
 
-    init(literals: [String], rules: [(Value, Value)]) {
+    init(literals: [String], rules: [(Value, Value)], macroId: Int) {
         self.literals = literals
         self.rules = rules
+        self.macroId = macroId
     }
 
-    static func parse(_ spec: Value) throws -> SyntaxRules {
+    static func parse(_ spec: Value, definedIn env: Environment) throws -> SyntaxRules {
         let elems = try listToArray(spec)
         guard elems.count >= 2, case .symbol(let head) = elems[0], baseName(head) == "syntax-rules" else {
             throw schemeError("malformed syntax-rules")
@@ -46,7 +48,7 @@ public final class SyntaxRules {
             }
             rules.append((pattern, template))
         }
-        return SyntaxRules(literals: literals, rules: rules)
+        return SyntaxRules(literals: literals, rules: rules, macroId: env.scopes.register(env))
     }
 
     func expand(_ form: Value, _ gensym: Gensym) throws -> Value {
@@ -57,8 +59,8 @@ public final class SyntaxRules {
             if case .pair(let pp) = pattern { patternArgs = pp.cdr } else { patternArgs = .null }
             if let bindings = matchPattern(patternArgs, formArgs, literals) {
                 let vars = patternVarsIn(pattern, literals)
-                let markId = gensym.next()
-                return try instantiate(template, bindings, markId, vars, false)
+                let mark = String(hygieneMark) + "\(gensym.next()).\(macroId)"
+                return try instantiate(template, bindings, mark, vars, .code)
             }
         }
         throw schemeError("no matching syntax rule for \(displayString(form))")
@@ -157,7 +159,22 @@ func matchSeq(_ pElems: [Value], _ pTail: Value, _ fElems: [Value], _ fTail: Val
     return bindings
 }
 
-func instantiate(_ template: Value, _ bindings: [String: MatchTree], _ markId: Int, _ patternVars: Set<String>, _ inQuote: Bool) throws -> Value {
+enum TemplateContext {
+    case code
+    case quoted
+    case quasiquoted
+}
+
+private func quotingTransition(_ head: String, _ context: TemplateContext) -> TemplateContext? {
+    switch (head, context) {
+    case ("quote", .code): return .quoted
+    case ("quasiquote", .code): return .quasiquoted
+    case ("unquote", .quasiquoted), ("unquote-splicing", .quasiquoted): return .code
+    default: return nil
+    }
+}
+
+func instantiate(_ template: Value, _ bindings: [String: MatchTree], _ mark: String, _ patternVars: Set<String>, _ context: TemplateContext) throws -> Value {
     switch template {
     case .symbol(let s):
         if patternVars.contains(s) {
@@ -166,14 +183,15 @@ func instantiate(_ template: Value, _ bindings: [String: MatchTree], _ markId: I
             }
             return v
         }
-        if inQuote { return template }
+        if context != .code { return template }
         if baseName(s) == ellipsisName { return template }
-        return .symbol(s + String(hygieneMark) + String(markId))
+        return .symbol(s + mark)
     case .pair:
         let (elems, tail) = listToArrayWithTail(template)
-        if elems.count == 2, case .symbol(let s0) = elems[0], baseName(s0) == "quote", case .null = tail {
-            let inner = try instantiate(elems[1], bindings, markId, patternVars, true)
-            return arrayToList([.symbol("quote"), inner])
+        if elems.count == 2, case .symbol(let s0) = elems[0], case .null = tail,
+           let inner = quotingTransition(baseName(s0), context) {
+            let body = try instantiate(elems[1], bindings, mark, patternVars, inner)
+            return arrayToList([.symbol(baseName(s0)), body])
         }
         var out: [Value] = []
         var i = 0
@@ -190,11 +208,11 @@ func instantiate(_ template: Value, _ bindings: [String: MatchTree], _ markId: I
                     for v in evars {
                         if case .seq(let arr)? = bindings[v] { child[v] = arr[j] }
                     }
-                    out.append(try instantiate(sub, child, markId, patternVars, inQuote))
+                    out.append(try instantiate(sub, child, mark, patternVars, context))
                 }
                 i += 2
             } else {
-                out.append(try instantiate(elems[i], bindings, markId, patternVars, inQuote))
+                out.append(try instantiate(elems[i], bindings, mark, patternVars, context))
                 i += 1
             }
         }
@@ -202,7 +220,7 @@ func instantiate(_ template: Value, _ bindings: [String: MatchTree], _ markId: I
         if case .null = tail {
             newTail = .null
         } else {
-            newTail = try instantiate(tail, bindings, markId, patternVars, inQuote)
+            newTail = try instantiate(tail, bindings, mark, patternVars, context)
         }
         return arrayToList(out, tail: newTail)
     default:

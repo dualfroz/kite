@@ -23,6 +23,8 @@ private func render(_ value: Value, write: Bool) -> String {
         return b ? "#t" : "#f"
     case .integer(let n):
         return String(n)
+    case .bigint(let b):
+        return b.description
     case .rational(let n, let d):
         return "\(n)/\(d)"
     case .real(let d):
@@ -37,6 +39,24 @@ private func render(_ value: Value, write: Bool) -> String {
         return baseName(s)
     case .pair:
         return renderList(value, write: write)
+    case .vector(let v):
+        return "#(" + v.items.map { render($0, write: write) }.joined(separator: " ") + ")"
+    case .hashTable(let h):
+        return "#<hash-table \(h.count)>"
+    case .port(let p):
+        return p.isInput ? "#<input-port>" : "#<output-port>"
+    case .errorObject(let e):
+        let parts = [e.message] + e.irritants.map { render($0, write: true) }
+        return "#<error " + parts.joined(separator: " ") + ">"
+    case .promise:
+        return "#<promise>"
+    case .record(let r):
+        let fields = zip(r.type.fields, r.fields).map { "\($0)=\(render($1, write: true))" }
+        return "#<" + ([r.type.name] + fields).joined(separator: " ") + ">"
+    case .recordType(let t):
+        return "#<record-type \(t.name)>"
+    case .values(let vs):
+        return vs.map { render($0, write: write) }.joined(separator: " ")
     case .builtin(let b):
         return "#<procedure:\(b.name)>"
     case .closure(let l):

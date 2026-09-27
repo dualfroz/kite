@@ -16,7 +16,7 @@ public indirect enum Kont {
     case dwBeforeK(before: Value, thunk: Value, after: Value, Kont)
     case dwThunkK(after: Value, winderId: Int, Kont)
     case dwAfterK(result: Value, Kont)
-    case rewindK(afters: [Value], befores: [Value], target: [Winder], arg: Value, saved: Kont)
+    case rewindK(afters: [Value], befores: [Winder], target: [Winder], arg: Value, saved: Kont)
     case callValuesK(receiver: Value, Kont)
 }
 

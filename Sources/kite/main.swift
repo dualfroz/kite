@@ -10,10 +10,8 @@ func runFile(_ path: String) -> Int32 {
     do {
         try interp.evalString(source)
         return 0
-    } catch let error as SchemeError {
-        FileHandle.standardError.write(Data("error: \(error.description)\n".utf8))
-        return 1
     } catch {
+        fflush(stdout)
         FileHandle.standardError.write(Data("error: \(error)\n".utf8))
         return 1
     }
@@ -43,15 +41,14 @@ func runRepl() {
         buffer = ""
         for form in forms {
             do {
-                let result = try interp.evalTop(form)
-                switch result {
+                switch try interp.evalTop(form) {
                 case .unspecified:
                     break
-                default:
-                    print(writeString(result))
+                case .values(let parts) where parts.isEmpty:
+                    break
+                case let value:
+                    print(writeString(value))
                 }
-            } catch let error as SchemeError {
-                print("error: \(error.description)")
             } catch {
                 print("error: \(error)")
             }
