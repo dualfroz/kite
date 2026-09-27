@@ -129,6 +129,40 @@ final class EvalTests: XCTestCase {
         XCTAssertThrowsError(try eval("(+ 1 undefined-thing)"))
     }
 
+    func testBuiltinArityErrors() {
+        XCTAssertThrowsError(try eval("(car)")) { error in
+            XCTAssertEqual((error as? SchemeError)?.description, "car: expected 1 argument, got 0")
+        }
+        XCTAssertThrowsError(try eval("(cons 1)"))
+        XCTAssertThrowsError(try eval("(vector-ref #(1))"))
+    }
+
+    func testStringAndCharOperations() throws {
+        XCTAssertEqual(try evalShow("(list->string (reverse (string->list \"abc\")))"), "cba")
+        XCTAssertEqual(try evalShow("(string-upcase \"MiXed\")"), "MIXED")
+        XCTAssertEqual(try evalShow("(list (string<? \"apple\" \"banana\") (string-ci=? \"ABC\" \"abc\") (char<? #\\a #\\b #\\c))"), "(#t #t #t)")
+        XCTAssertEqual(try evalShow("(string-map char-upcase \"abc\")"), "ABC")
+        XCTAssertEqual(try evalShow("(list (char-numeric? #\\7) (digit-value #\\7) (string-ref \"xyz\" 2))"), "(#t 7 z)")
+    }
+
+    func testListUtilities() throws {
+        XCTAssertEqual(try evalShow("(fold-left + 0 '(1 2 3) '(10 20 30))"), "66")
+        XCTAssertEqual(try evalShow("(fold-right cons '() '(1 2 3))"), "(1 2 3)")
+        XCTAssertEqual(try evalShow("(reduce + 0 '(1 2 3 4))"), "10")
+        XCTAssertEqual(try evalShow("(remove even? '(1 2 3 4))"), "(1 3)")
+        XCTAssertEqual(try evalShow("(list (cadr '(1 2 3)) (cdddr '(1 2 3 4)) (last-pair '(1 2 3)) (make-list 2 'x))"), "(2 (4) (3) (x x))")
+        XCTAssertEqual(try evalShow("(list (cadadr '(1 (2 3))) (cddddr '(1 2 3 4 5)) (caar '((a))))"), "(3 (5) a)")
+    }
+
+    func testPreludeSurvivesUserRedefinitions() throws {
+        let program = """
+        (define (reverse xs) 'broken)
+        (define (apply . args) 'broken)
+        (map (lambda (x y) (+ x y)) '(1 2) '(10 20))
+        """
+        XCTAssertEqual(try evalShow(program), "(11 22)")
+    }
+
     func testCapturedOutput() throws {
         let interp = Interpreter()
         var captured = ""

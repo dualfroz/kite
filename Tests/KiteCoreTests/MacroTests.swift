@@ -71,6 +71,83 @@ final class MacroTests: XCTestCase {
         XCTAssertEqual(try evalShow(program), "(was-zero was-other)")
     }
 
+    func testFreeIdentifierIgnoresLocalShadowing() throws {
+        let program = """
+        (define-syntax my-list
+          (syntax-rules ()
+            ((_ e ...) (list e ...))))
+        (let ((list (lambda args 'shadowed)))
+          (my-list 1 2))
+        """
+        XCTAssertEqual(try evalShow(program), "(1 2)")
+    }
+
+    func testFreeIdentifierRefersToDefinitionScope() throws {
+        let program = """
+        (let ((x 'outer))
+          (let-syntax ((get-x (syntax-rules () ((_) x))))
+            (let ((x 'inner))
+              (get-x))))
+        """
+        XCTAssertEqual(try evalShow(program), "outer")
+    }
+
+    func testMacroCanSetFreeVariableOfDefinitionScope() throws {
+        let program = """
+        (define counter 0)
+        (define-syntax bump! (syntax-rules () ((_) (set! counter (+ counter 1)))))
+        (let ((counter 100))
+          (bump!)
+          (bump!))
+        counter
+        """
+        XCTAssertEqual(try evalShow(program), "2")
+    }
+
+    func testKeywordsInTemplatesSurviveShadowing() throws {
+        let program = """
+        (define-syntax swap!
+          (syntax-rules ()
+            ((_ a b) (let ((tmp a)) (set! a b) (set! b tmp)))))
+        (let ((let 'not-a-keyword) (if 'nope) (x 1) (y 2))
+          (swap! x y)
+          (list x y))
+        """
+        XCTAssertEqual(try evalShow(program), "(2 1)")
+    }
+
+    func testDerivedFormsIgnoreShadowedPrimitives() throws {
+        XCTAssertEqual(try evalShow("(let ((cons list) (append 0)) `(1 ,@(list 2 3) ,(+ 2 2)))"), "(1 2 3 4)")
+        XCTAssertEqual(try evalShow("(let ((memv #f)) (case 3 ((1 2) 'low) ((3) 'three) (else 'high)))"), "three")
+    }
+
+    func testQuotedSymbolsInTemplatesStayPlain() throws {
+        let program = """
+        (define-syntax tag
+          (syntax-rules ()
+            ((_ x) `(tagged ,x ,(list 'inner x)))))
+        (let ((result (tag 5)))
+          (list result (eq? (car result) 'tagged) (eq? (car (caddr result)) 'inner)))
+        """
+        XCTAssertEqual(try evalShow(program), "((tagged 5 (inner 5)) #t #t)")
+    }
+
+    func testLetrecSyntaxRecursion() throws {
+        let program = """
+        (letrec-syntax ((my-and (syntax-rules ()
+                                  ((_) #t)
+                                  ((_ e) e)
+                                  ((_ e rest ...) (if e (my-and rest ...) #f)))))
+          (list (my-and 1 2 3) (my-and 1 #f 3)))
+        """
+        XCTAssertEqual(try evalShow(program), "(3 #f)")
+    }
+
+    func testDoLoop() throws {
+        XCTAssertEqual(try evalShow("(do ((i 0 (+ i 1)) (acc '() (cons i acc))) ((= i 4) acc))"), "(3 2 1 0)")
+        XCTAssertEqual(try evalShow("(let ((v (make-vector 3))) (do ((i 0 (+ i 1))) ((= i 3) v) (vector-set! v i (* i i))))"), "#(0 1 4)")
+    }
+
     func testNestedEllipsisTemplate() throws {
         let program = """
         (define-syntax my-let

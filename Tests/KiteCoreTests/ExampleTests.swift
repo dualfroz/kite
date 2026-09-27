@@ -63,4 +63,43 @@ final class ExampleTests: XCTestCase {
         """
         XCTAssertEqual(try runExample("macros.scm"), expected)
     }
+
+    func testTailLoopExample() throws {
+        XCTAssertEqual(try runExample("tailloop.scm"), "counted to 100000\neven? 100000 -> #t\n")
+    }
+
+    func testExceptionsExample() throws {
+        let expected = """
+        10 / 4 = 5/2
+        error: division by zero
+        42 -> 42
+        abc -> rejected: not a number
+        -3 -> rejected: negative
+        dynamic-wind trail: (open work close (caught disk-full))
+        continuable: 3
+
+        """
+        XCTAssertEqual(try runExample("exceptions.scm"), expected)
+    }
+
+    func testStreamsExample() throws {
+        let expected = """
+        primes: (2 3 5 7 11 13 17 19 23 29)
+        fib 100 = 354224848179261915075
+        forced twice, evaluated 1 time
+        delay-force chain of 100000: liftoff
+
+        """
+        XCTAssertEqual(try runExample("streams.scm"), expected)
+    }
+
+    func testWordCountExample() throws {
+        let expected = """
+        distinct words: 11
+        top three: the=4 dog=2 fox=2 \("")
+        words by length: #(0 0 0 9 3 3 1 0)
+
+        """
+        XCTAssertEqual(try runExample("wordcount.scm"), expected)
+    }
 }
